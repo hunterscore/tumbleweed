@@ -1,0 +1,25 @@
+[project]
+name = "tumbleweed"
+version = "0.1.0"
+description = "Spacecraft pose estimation on SPEED+ (Tango spacecraft)"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "numpy>=1.23",
+    "opencv-python-headless>=4.7",
+    "pillow>=9.0",
+    "tqdm>=4.65",
+    "cvxpy>=1.4",
+    "osqp>=0.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["tumbleweed*"]
