@@ -35,6 +35,39 @@ def translation_error_norm(
     return torch.norm(t_pred - t_gt, dim=-1) / torch.norm(t_gt, dim=-1).clamp(min=eps)
 
 
+def distribution_stats(name: str, values: torch.Tensor) -> Dict[str, float]:
+    """mean/median/std/p90/p95 of a per-sample error tensor, prefixed by name.
+
+    A single mean hides heavy-tailed error distributions - e.g. this
+    baseline's rotation error has a median around 11 deg but a p99 over
+    130 deg, because a small fraction of samples are near-total orientation
+    flips rather than everything being uniformly imprecise. Report the full
+    spread, not just the mean, whenever these errors matter.
+    """
+    return {
+        f"mean_{name}": values.mean().item(),
+        f"median_{name}": values.median().item(),
+        f"std_{name}": values.std().item(),
+        f"p90_{name}": torch.quantile(values, 0.90).item(),
+        f"p95_{name}": torch.quantile(values, 0.95).item(),
+    }
+
+
+def flip_rate(rotation_error_deg: torch.Tensor, threshold_deg: float = 90.0) -> float:
+    """Fraction of samples whose rotation error exceeds `threshold_deg`.
+
+    A direct-regression pose head outputs one committed quaternion even when
+    an image is genuinely ambiguous between two orientations (e.g. a
+    near-symmetric spacecraft body) - when it guesses wrong, the result
+    tends to be a near-total flip (~180 deg) rather than a small miss. This
+    tracks how often that happens, independent of the mean/median, which
+    barely move when a small fraction of predictions are catastrophically
+    wrong. Default threshold (90 deg) flags "wrong orientation family", not
+    just "imprecise".
+    """
+    return (rotation_error_deg > threshold_deg).float().mean().item()
+
+
 def speed_score(
     t_pred: torch.Tensor,
     q_pred: torch.Tensor,

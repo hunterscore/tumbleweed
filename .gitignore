@@ -12,6 +12,7 @@ data/speedplusv2/
 checkpoints/
 runs/
 outputs/
+results/
 *.pt
 *.pth
 

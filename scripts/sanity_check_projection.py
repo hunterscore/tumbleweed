@@ -26,17 +26,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tumbleweed.data.camera import load_camera
-from tumbleweed.geometry.projection import axis_points, project_points
-
-
-def draw_pose(image: np.ndarray, points_2d: np.ndarray, colors: np.ndarray) -> np.ndarray:
-    origin = tuple(points_2d[0].astype(int))
-    out = image.copy()
-    for i in range(3):
-        tip = tuple(points_2d[i + 1].astype(int))
-        cv2.line(out, origin, tip, colors[i].tolist(), thickness=4, lineType=cv2.LINE_AA)
-    cv2.circle(out, origin, 6, (0, 255, 255), thickness=-1, lineType=cv2.LINE_AA)
-    return out
+from tumbleweed.geometry.projection import axis_points, draw_pose, project_points
 
 
 def main():

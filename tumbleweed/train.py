@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 from pathlib import Path
 
@@ -77,6 +78,10 @@ def train(args: argparse.Namespace) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_score = float("inf")
 
+    metrics_csv_path = checkpoint_dir / "metrics.csv"
+    metrics_csv_file = open(metrics_csv_path, "w", newline="")
+    metrics_csv_writer = None  # created once we know the metrics dict's keys
+
     for epoch in range(1, args.epochs + 1):
         model.train()
         running_loss = 0.0
@@ -97,12 +102,22 @@ def train(args: argparse.Namespace) -> None:
 
         train_loss = running_loss / len(train_loader)
         metrics = evaluate(model, val_loader, args.device)
+
+        row = {"epoch": epoch, "train_loss": train_loss, **metrics}
+        if metrics_csv_writer is None:
+            metrics_csv_writer = csv.DictWriter(metrics_csv_file, fieldnames=list(row.keys()))
+            metrics_csv_writer.writeheader()
+        metrics_csv_writer.writerow(row)
+        metrics_csv_file.flush()
+
         logger.info(
-            "epoch %d: train_loss=%.4f  val_t_err=%.4f  val_q_err_deg=%.4f  val_speed_score=%.4f",
+            "epoch %d: train_loss=%.4f  val_t_err=%.4f  val_q_err_deg=%.4f  "
+            "flip_rate_90deg=%.4f  val_speed_score=%.4f",
             epoch,
             train_loss,
             metrics["mean_translation_error"],
             metrics["mean_rotation_error_deg"],
+            metrics["flip_rate_90deg"],
             metrics["mean_speed_score"],
         )
 
@@ -111,6 +126,9 @@ def train(args: argparse.Namespace) -> None:
             best_score = metrics["mean_speed_score"]
             torch.save({"model": model.state_dict(), "epoch": epoch}, checkpoint_dir / "best.pt")
             logger.info("epoch %d: new best speed_score=%.4f, saved checkpoint", epoch, best_score)
+
+    metrics_csv_file.close()
+    logger.info("wrote per-epoch metrics to %s", metrics_csv_path)
 
 
 def main():

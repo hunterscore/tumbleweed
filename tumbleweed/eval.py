@@ -4,30 +4,94 @@ pose error metric (mean translation error, mean rotation error, mean score).
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
+from pathlib import Path
+from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader
 
 from tumbleweed.data.speedplus import SpeedPlusDataset
 from tumbleweed.data.transforms import build_transforms
-from tumbleweed.metrics import speed_score
+from tumbleweed.metrics import distribution_stats, flip_rate, speed_score
 from tumbleweed.models.pose_resnet import PoseResNet18
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
+_PER_SAMPLE_HEADER = (
+    ["filename", "translation_error", "rotation_error_deg", "speed_score", "gt_range_m"]
+    + [f"t_gt_{c}" for c in "xyz"]
+    + [f"t_pred_{c}" for c in "xyz"]
+    + [f"q_gt_{c}" for c in "wxyz"]
+    + [f"q_pred_{c}" for c in "wxyz"]
+)
+
+
+def _write_error_csv(
+    path: str,
+    metrics: dict,
+    per_sample: bool,
+    filenames: list,
+    t_err: torch.Tensor,
+    q_err: torch.Tensor,
+    score: torch.Tensor,
+    gt_range: Optional[torch.Tensor],
+    t_gt: Optional[torch.Tensor] = None,
+    t_pred: Optional[torch.Tensor] = None,
+    q_gt: Optional[torch.Tensor] = None,
+    q_pred: Optional[torch.Tensor] = None,
+) -> None:
+    out_path = Path(path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(out_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        if per_sample:
+            writer.writerow(_PER_SAMPLE_HEADER)
+            for fname, te, qe, s, r, tg, tp, qg, qp in zip(
+                filenames,
+                t_err.tolist(),
+                q_err.tolist(),
+                score.tolist(),
+                gt_range.tolist(),
+                t_gt.tolist(),
+                t_pred.tolist(),
+                q_gt.tolist(),
+                q_pred.tolist(),
+            ):
+                writer.writerow([fname, te, qe, s, r, *tg, *tp, *qg, *qp])
+        else:
+            writer.writerow(list(metrics.keys()))
+            writer.writerow(list(metrics.values()))
+
+    logger.info("wrote %s error CSV to %s", "per-sample" if per_sample else "summary", out_path)
+
+
 @torch.no_grad()
-def evaluate(model: torch.nn.Module, dataloader: DataLoader, device: str) -> dict:
+def evaluate(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: str,
+    error_csv_path: Optional[str] = None,
+    per_sample: bool = False,
+) -> dict:
     """Run `model` over `dataloader` and return aggregate SPEC metrics.
 
     Requires the dataloader's dataset to carry pose labels
-    (``SpeedPlusDataset.has_pose``).
+    (``SpeedPlusDataset.has_pose``). If ``error_csv_path`` is given, also
+    writes either a one-row summary or (if ``per_sample``) a per-sample
+    breakdown (filename, translation/rotation error, GT range) to that path
+    - the per-sample form is the raw material for range-dependent error
+    analysis and for calibrating the closed-loop noise model later.
     """
     model.eval()
 
     all_t_err, all_q_err, all_score = [], [], []
+    all_range, all_filenames = [], []
+    all_t_gt, all_t_pred, all_q_gt, all_q_pred = [], [], [], []
     for batch in dataloader:
         images = batch["image"].to(device)
         t_gt = batch["translation"].to(device)
@@ -39,17 +103,44 @@ def evaluate(model: torch.nn.Module, dataloader: DataLoader, device: str) -> dic
         all_t_err.append(result["translation_error"].cpu())
         all_q_err.append(result["rotation_error_deg"].cpu())
         all_score.append(result["score"].cpu())
+        if per_sample:
+            all_range.append(t_gt.norm(dim=-1).cpu())
+            all_filenames.extend(batch["filename"])
+            all_t_gt.append(t_gt.cpu())
+            all_t_pred.append(t_pred.cpu())
+            all_q_gt.append(q_gt.cpu())
+            all_q_pred.append(q_pred.cpu())
 
     t_err = torch.cat(all_t_err)
     q_err = torch.cat(all_q_err)
     score = torch.cat(all_score)
+    gt_range = torch.cat(all_range) if per_sample else None
 
-    return {
-        "mean_translation_error": t_err.mean().item(),
-        "mean_rotation_error_deg": q_err.mean().item(),
-        "mean_speed_score": score.mean().item(),
+    metrics = {
         "num_samples": len(score),
+        **distribution_stats("translation_error", t_err),
+        **distribution_stats("rotation_error_deg", q_err),
+        "flip_rate_90deg": flip_rate(q_err, threshold_deg=90.0),
+        "mean_speed_score": score.mean().item(),
     }
+
+    if error_csv_path is not None:
+        _write_error_csv(
+            error_csv_path,
+            metrics,
+            per_sample,
+            all_filenames,
+            t_err,
+            q_err,
+            score,
+            gt_range,
+            t_gt=torch.cat(all_t_gt) if per_sample else None,
+            t_pred=torch.cat(all_t_pred) if per_sample else None,
+            q_gt=torch.cat(all_q_gt) if per_sample else None,
+            q_pred=torch.cat(all_q_pred) if per_sample else None,
+        )
+
+    return metrics
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -61,6 +152,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--error-csv",
+        type=str,
+        default=None,
+        help="path to save error metrics; defaults to results/<checkpoint-stem>_<domain>-<split>.csv",
+    )
+    parser.add_argument(
+        "--advanced",
+        action="store_true",
+        help="dump per-sample errors (filename, translation/rotation error, GT range) instead of just the summary",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     return parser
 
@@ -87,12 +189,22 @@ def main():
     state = torch.load(args.checkpoint, map_location=args.device)
     model.load_state_dict(state["model"] if "model" in state else state)
 
-    metrics = evaluate(model, dataloader, args.device)
+    error_csv_path = args.error_csv
+    if error_csv_path is None:
+        checkpoint_stem = Path(args.checkpoint).stem
+        error_csv_path = f"results/{checkpoint_stem}_{args.domain}-{args.split}.csv"
+
+    metrics = evaluate(
+        model, dataloader, args.device, error_csv_path=error_csv_path, per_sample=args.advanced
+    )
     logger.info(
-        "eval: n=%d  mean_t_err=%.4f  mean_q_err_deg=%.4f  mean_speed_score=%.4f",
+        "eval: n=%d  mean_t_err=%.4f  mean_q_err_deg=%.4f  median_q_err_deg=%.4f  "
+        "flip_rate_90deg=%.4f  mean_speed_score=%.4f",
         metrics["num_samples"],
         metrics["mean_translation_error"],
         metrics["mean_rotation_error_deg"],
+        metrics["median_rotation_error_deg"],
+        metrics["flip_rate_90deg"],
         metrics["mean_speed_score"],
     )
 
