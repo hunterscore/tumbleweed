@@ -12,9 +12,11 @@ from typing import Optional
 import torch
 from torch.utils.data import DataLoader
 
+from tumbleweed.data.camera import load_camera
 from tumbleweed.data.speedplus import SpeedPlusDataset
-from tumbleweed.data.transforms import build_transforms
+from tumbleweed.data.transforms import build_keypoint_transforms, build_transforms
 from tumbleweed.metrics import distribution_stats, flip_rate, speed_score
+from tumbleweed.models.keypoint_resnet import KeypointPoseEstimator, KeypointResNet18
 from tumbleweed.models.pose_resnet import PoseResNet18
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -149,7 +151,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--domain", type=str, default="synthetic")
     parser.add_argument("--split", type=str, default="validation")
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="regression",
+        choices=["regression", "keypoint"],
+        help="architecture the checkpoint belongs to",
+    )
     parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument(
+        "--keypoint-image-size",
+        type=int,
+        nargs=2,
+        default=[384, 640],
+        help="input size for --model keypoint; must match training",
+    )
+    parser.add_argument("--stride", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument(
@@ -167,14 +184,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_model(args: argparse.Namespace):
+    """Load the checkpoint into whichever architecture produced it.
+
+    Both return ``(translation, quaternion)`` from ``forward``, so everything
+    downstream of here is shared.
+    """
+    state = torch.load(args.checkpoint, map_location=args.device)
+    weights = state["model"] if "model" in state else state
+
+    if args.model == "regression":
+        model = PoseResNet18(pretrained=False)
+        model.load_state_dict(weights)
+        return model.to(args.device), build_transforms(image_size=args.image_size, train=False)
+
+    camera = load_camera(Path(args.data_root) / "camera.json")
+    network = KeypointResNet18(pretrained=False)
+    network.load_state_dict(weights)
+    image_size = tuple(args.keypoint_image_size)
+    estimator = KeypointPoseEstimator(
+        network, camera, image_size=image_size, stride=args.stride
+    ).to(args.device)
+    transform = build_keypoint_transforms(camera, image_size=image_size, stride=args.stride)
+    return estimator, transform
+
+
 def main():
     args = build_arg_parser().parse_args()
+
+    model, transform = build_model(args)
 
     dataset = SpeedPlusDataset(
         root=args.data_root,
         domain=args.domain,
         split=args.split,
-        transform=build_transforms(image_size=args.image_size, train=False),
+        transform=transform,
     )
     if not dataset.has_pose:
         raise ValueError(
@@ -185,10 +229,6 @@ def main():
         dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers
     )
 
-    model = PoseResNet18(pretrained=False).to(args.device)
-    state = torch.load(args.checkpoint, map_location=args.device)
-    model.load_state_dict(state["model"] if "model" in state else state)
-
     error_csv_path = args.error_csv
     if error_csv_path is None:
         checkpoint_stem = Path(args.checkpoint).stem
@@ -197,6 +237,8 @@ def main():
     metrics = evaluate(
         model, dataloader, args.device, error_csv_path=error_csv_path, per_sample=args.advanced
     )
+    if isinstance(model, KeypointPoseEstimator):
+        logger.info("pnp_failure_rate=%.4f", model.failure_rate)
     logger.info(
         "eval: n=%d  mean_t_err=%.4f  mean_q_err_deg=%.4f  median_q_err_deg=%.4f  "
         "flip_rate_90deg=%.4f  mean_speed_score=%.4f",

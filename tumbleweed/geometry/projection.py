@@ -24,11 +24,13 @@ def project_points(
 ) -> np.ndarray:
     """Project 3D points defined in the Tango body frame into pixel coords.
 
-    ``q_vbs2tango`` rotates the camera (VBS) frame into the Tango body
-    frame, and ``t_vbs2tango`` is the Tango origin expressed in the camera
-    frame. To bring a body-frame point into the camera frame we therefore
-    apply the inverse rotation (the transpose, since it's orthonormal) and
-    then add the translation: ``p_cam = R^T @ p_body + t``.
+    ``q_vbs2tango`` names the vbs->tango DCM in the aerospace (passive)
+    convention, but :func:`to_rotation_matrix` returns the Hamilton (active)
+    rotation matrix, which is that DCM's transpose. So ``to_rotation_matrix``
+    applied to ``q_vbs2tango`` already yields tango->vbs, and a body-frame
+    point reaches the camera frame as ``p_cam = R @ p_body + t`` with no
+    further transpose. Verified against the dataset by reprojecting the Tango
+    keypoint model onto labeled images (``scripts/sanity_check_keypoints.py``).
 
     Args:
         points_body: (N, 3) points in the Tango body frame, meters.
@@ -40,8 +42,7 @@ def project_points(
         (N, 2) pixel coordinates.
     """
     q = torch.as_tensor(q_vbs2tango, dtype=torch.float64)
-    r_vbs2tango = to_rotation_matrix(q[None, :])[0].numpy()
-    r_tango2vbs = r_vbs2tango.T
+    r_tango2vbs = to_rotation_matrix(q[None, :])[0].numpy()
 
     rvec, _ = cv2.Rodrigues(r_tango2vbs)
     tvec = np.asarray(t_vbs2tango, dtype=np.float64).reshape(3, 1)

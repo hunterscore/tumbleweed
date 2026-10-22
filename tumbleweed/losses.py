@@ -1,4 +1,4 @@
-"""Losses for direct pose regression: geodesic rotation loss + translation MSE."""
+"""Losses for pose estimation: direct-regression pose losses and heatmap MSE."""
 from __future__ import annotations
 
 from typing import Dict, Tuple
@@ -44,3 +44,35 @@ class PoseLoss(nn.Module):
             "loss/rotation_geodesic_rad": rot_loss.item(),
         }
         return total, logs
+
+
+class KeypointLoss(nn.Module):
+    """Visibility-masked MSE between predicted and target keypoint heatmaps.
+
+    Targets are almost entirely zeros, so plain MSE is minimized fairly well by
+    predicting nothing anywhere; ``peak_weight`` upweights the pixels covered by
+    a target Gaussian to keep that collapse from being the easy optimum.
+    """
+
+    def __init__(self, peak_weight: float = 20.0):
+        super().__init__()
+        self.peak_weight = peak_weight
+
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        visible: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        weight = 1.0 + self.peak_weight * target
+        per_keypoint = (weight * (pred - target) ** 2).mean(dim=(-2, -1))
+
+        mask = visible
+        loss = (per_keypoint * mask).sum() / mask.sum().clamp(min=1.0)
+
+        logs = {
+            "loss/total": loss.item(),
+            "loss/heatmap_mse": loss.item(),
+            "loss/visible_frac": mask.mean().item(),
+        }
+        return loss, logs

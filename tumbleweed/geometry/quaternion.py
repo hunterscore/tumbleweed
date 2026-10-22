@@ -46,6 +46,36 @@ def to_rotation_matrix(q: torch.Tensor) -> torch.Tensor:
     return torch.stack(rows, dim=-2)
 
 
+def from_rotation_matrix(r: torch.Tensor) -> torch.Tensor:
+    """Convert rotation matrices (..., 3, 3) to unit quaternions (..., 4).
+
+    Inverse of :func:`to_rotation_matrix`. Uses the branch with the largest
+    divisor to stay numerically stable near the trace-based branch's
+    singularities, and returns the ``w >= 0`` representative of each
+    double-cover pair so results are comparable elementwise.
+    """
+    r00, r01, r02 = r[..., 0, 0], r[..., 0, 1], r[..., 0, 2]
+    r10, r11, r12 = r[..., 1, 0], r[..., 1, 1], r[..., 1, 2]
+    r20, r21, r22 = r[..., 2, 0], r[..., 2, 1], r[..., 2, 2]
+    trace = r00 + r11 + r22
+
+    candidates = torch.stack(
+        [
+            torch.stack([1.0 + trace, r21 - r12, r02 - r20, r10 - r01], dim=-1),
+            torch.stack([r21 - r12, 1.0 + r00 - r11 - r22, r01 + r10, r02 + r20], dim=-1),
+            torch.stack([r02 - r20, r01 + r10, 1.0 - r00 + r11 - r22, r12 + r21], dim=-1),
+            torch.stack([r10 - r01, r02 + r20, r12 + r21, 1.0 - r00 - r11 + r22], dim=-1),
+        ],
+        dim=-2,
+    )
+    divisors = torch.stack([1.0 + trace, 1.0 + r00 - r11 - r22, 1.0 - r00 + r11 - r22, 1.0 - r00 - r11 + r22], dim=-1)
+
+    best = divisors.argmax(dim=-1, keepdim=True)
+    q = torch.gather(candidates, -2, best[..., None].expand(*best.shape, 4)).squeeze(-2)
+    q = normalize(q)
+    return torch.where(q[..., :1] < 0, -q, q)
+
+
 def multiply(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
     """Hamilton product q1 ⊗ q2 of scalar-first quaternions (..., 4).
 

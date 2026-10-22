@@ -17,3 +17,7 @@ results/
 *.pth
 
 .DS_Store
+
+# run logs and sanity-check output
+*train_log.txt
+keypoint_checks/
