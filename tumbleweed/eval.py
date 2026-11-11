@@ -181,6 +181,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="dump per-sample errors (filename, translation/rotation error, GT range) instead of just the summary",
     )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--prior-checkpoint", type=str, default=None, help="regression checkpoint as a pose prior for --model keypoint")
     return parser
 
 
@@ -193,17 +194,27 @@ def build_model(args: argparse.Namespace):
     state = torch.load(args.checkpoint, map_location=args.device)
     weights = state["model"] if "model" in state else state
 
+    prior_model = None
+    
     if args.model == "regression":
         model = PoseResNet18(pretrained=False)
         model.load_state_dict(weights)
         return model.to(args.device), build_transforms(image_size=args.image_size, train=False)
+
+    # load trained regression prior
+    if args.prior_checkpoint is not None:
+        prior_state = torch.load(args.prior_checkpoint, map_location=args.device)
+        prior_weights = prior_state["model"] if "model" in prior_state else prior_state
+        prior_model = PoseResNet18(pretrained=False)
+        prior_model.load_state_dict(prior_weights)
+
 
     camera = load_camera(Path(args.data_root) / "camera.json")
     network = KeypointResNet18(pretrained=False)
     network.load_state_dict(weights)
     image_size = tuple(args.keypoint_image_size)
     estimator = KeypointPoseEstimator(
-        network, camera, image_size=image_size, stride=args.stride
+        network, camera, image_size=image_size, stride=args.stride, prior_model=prior_model
     ).to(args.device)
     transform = build_keypoint_transforms(camera, image_size=image_size, stride=args.stride)
     return estimator, transform

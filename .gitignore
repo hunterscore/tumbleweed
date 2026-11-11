@@ -21,3 +21,6 @@ results/
 # run logs and sanity-check output
 *train_log.txt
 keypoint_checks/
+
+# local notes
+PLANNING.md
