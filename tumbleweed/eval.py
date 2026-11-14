@@ -250,6 +250,8 @@ def main():
     )
     if isinstance(model, KeypointPoseEstimator):
         logger.info("pnp_failure_rate=%.4f", model.failure_rate)
+        if model.prior_model is not None:
+            logger.info("prior_rejection_rate=%.4f", model.rejection_rate)
     logger.info(
         "eval: n=%d  mean_t_err=%.4f  mean_q_err_deg=%.4f  median_q_err_deg=%.4f  "
         "flip_rate_90deg=%.4f  mean_speed_score=%.4f",

@@ -84,6 +84,8 @@ class KeypointPoseEstimator(nn.Module):
         prior_image_size: int = 224,
         num_candidates: int = 4,
         reprojection_error: float = 20.0,
+        max_translation_deviation: float = 0.25,
+        max_rotation_deviation_deg: float = 45.0,
     ):
         super().__init__()
         self.network = network
@@ -94,11 +96,14 @@ class KeypointPoseEstimator(nn.Module):
         self.prior_image_size = prior_image_size
         self.num_candidates = num_candidates
         self.reprojection_error = reprojection_error
+        self.max_translation_deviation = max_translation_deviation
+        self.max_rotation_deviation_deg = max_rotation_deviation_deg
         # Heatmap cell -> full-resolution pixel, undoing the resize and stride.
         self.to_full_res = np.array(
             [stride * camera.width / image_size[1], stride * camera.height / image_size[0]]
         )
         self.num_failures = 0
+        self.num_rejected = 0
         self.num_solves = 0
 
     def forward(self, images: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -137,9 +142,15 @@ class KeypointPoseEstimator(nn.Module):
                 )
                 self.num_solves += 1
                 self.num_failures += not result.success
-                # A failed solve falls back to the prior rather than the identity placeholder.
-                translations.append(result.translation if result.success else pt)
-                quaternions.append(result.quaternion if result.success else pq)
+                # A wide RANSAC threshold occasionally lets a few bad points agree
+                # on a nonsense pose (e.g. a tiny spacecraft 1 km away), so a
+                # solve that strays far from the prior is treated as failed too.
+                rejected = result.success and not self._agrees_with_prior(result, pt, pq)
+                self.num_rejected += rejected
+                use_pnp = result.success and not rejected
+                # Otherwise fall back to the prior rather than the identity placeholder.
+                translations.append(result.translation if use_pnp else pt)
+                quaternions.append(result.quaternion if use_pnp else pq)
     
         device = images.device
         return (
@@ -147,10 +158,28 @@ class KeypointPoseEstimator(nn.Module):
             torch.as_tensor(np.stack(quaternions), dtype=torch.float32, device=device),
         )
 
+    def _agrees_with_prior(self, result, t_prior: np.ndarray, q_prior: np.ndarray) -> bool:
+        """Whether a PnP solve is within the gate around the prior pose.
+
+        Translation is compared relative to the prior's range, so the gate scales
+        with distance; rotation by the geodesic angle between the quaternions.
+        """
+        t_dev = np.linalg.norm(result.translation - t_prior) / np.linalg.norm(t_prior)
+        # |dot| because q and -q are the same rotation.
+        dot = abs(float(np.dot(result.quaternion, q_prior)))
+        r_dev = np.rad2deg(2.0 * np.arccos(min(dot, 1.0)))
+        return t_dev <= self.max_translation_deviation and r_dev <= self.max_rotation_deviation_deg
+
     @property
     def failure_rate(self) -> float:
         return self.num_failures / self.num_solves if self.num_solves else 0.0
 
+    @property
+    def rejection_rate(self) -> float:
+        """Fraction of solves that succeeded but were discarded for disagreeing with the prior."""
+        return self.num_rejected / self.num_solves if self.num_solves else 0.0
+
     def reset_failure_stats(self) -> None:
         self.num_failures = 0
+        self.num_rejected = 0
         self.num_solves = 0
